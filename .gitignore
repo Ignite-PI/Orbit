@@ -1,0 +1,35 @@
+# ORBIT Dashboard — git ignore
+
+# ── Raw source data (contain employee names and performance metrics) ──
+# These are rebuilt on every refresh from the Excel workbook.
+# They are NEVER committed — orbit-data.js and orbit-auth.js are the
+# sanitised deployment artifacts that get committed instead.
+_system/prod_raw.csv
+_system/qa_raw.csv
+_system/assoc_raw.csv
+*.xlsx
+*.xls
+
+# ── Keys and credentials ──
+orbit-keys.json
+*.env
+.env
+
+# ── Local VCS artefacts (ORBIT's own backup/versioning system) ──
+_system/BACKUP/
+_system/.versions/
+
+# ── Database files ──
+*.db
+*.db-shm
+*.db-wal
+
+# ── OS noise ──
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# ── Windows temp files ──
+*.tmp
+*.bak
+~$*
