@@ -2069,6 +2069,22 @@ const LP = (() => {
   const REC_QA    = RULE.REC_QA;     // recognition QA — provisional
   const LOB       = 'Dispute & Intake';   // current LOB — expand when new LOBs onboard
 
+  /* ── Evaluation window: completed months only ────────────────
+     The in-progress calendar month is excluded from ALL
+     qualification logic (PIP, Recognition, Dual/Prod/QA Fail,
+     consecutive-month checks, Executive Alerts). If data lags a
+     month behind, that month still counts — it is closed.       */
+  const NOW     = new Date();
+  const CUR_YM  = `${NOW.getFullYear()}-${String(NOW.getMonth() + 1).padStart(2, '0')}`;
+  function closedRows(rows) { return rows.filter(r => r.ym !== CUR_YM); }
+  function evalWindowLabel() {
+    const yms = [...new Set(cachedRows().map(r => r.ym))]
+      .filter(y => y !== CUR_YM).sort();
+    if (!yms.length) return '';
+    const latest = yms[yms.length - 1];
+    return `Evaluating completed months through ${fmtYM(latest)} — ${fmtYM(CUR_YM)} in progress, excluded`;
+  }
+
   /* ── Filter state + computed data cache ──────────────────── */
   const S = {
     pipReason: 'all',  pipMgr: 'all',  pipSearch: '',
@@ -2146,6 +2162,7 @@ const LP = (() => {
   }
 
   function computePIP(rows) {
+    rows = closedRows(rows);   // completed months only
     const out = [];
     Object.entries(byAssoc(rows)).forEach(([a, list]) => {
       const m = list[list.length - 1].m;
@@ -2209,6 +2226,7 @@ const LP = (() => {
   }
 
   function computeRecognition(rows) {
+    rows = closedRows(rows);   // completed months only
     const out = [];
     Object.entries(byAssoc(rows)).forEach(([a, list]) => {
       const m = list[list.length - 1].m;
@@ -2706,6 +2724,7 @@ Powered by Payment Integrity IGNITE
 
   /* ── Executive Alerts ────────────────────────────────────── */
   function computeAlerts(rows, pip, rec, scorecard) {
+    rows = closedRows(rows);   // completed months only
     const alerts = [];
 
     // HIGH: dual-fail associates need immediate review
@@ -3356,6 +3375,9 @@ Powered by Payment Integrity IGNITE
     const scorecard = computeScorecard(rows, DATA.pip, DATA.rec);
     const alerts    = computeAlerts(rows, DATA.pip, DATA.rec, scorecard);
     renderRules();
+    // Show which months qualified (in-progress month excluded)
+    const wl = evalWindowLabel();
+    document.querySelectorAll('.lp-eval-window').forEach(el => { el.textContent = wl; });
     if (!matrixInit) { initMatrix(); matrixInit = true; }
     const mgrBelow = scorecard.filter(g =>
       (g.prodPct != null && g.prodPct < PROD_PASS) ||
@@ -4490,7 +4512,75 @@ const NOTES = (() => {
   return { init, render, updateBadge };
 })();
 
+/* ═══════════════════════════════════════════════════════════════════════
+   PAYMENT INTEGRITY FUNCTION NAVIGATION
+   Central command-center selector. Functions flagged data-live="true"
+   show the existing ORBIT dashboard; all others show the Under
+   Construction landing panel. Selection persists via localStorage.
+   ═══════════════════════════════════════════════════════════════════════ */
+const FN = (() => {
+  const STORE_KEY = 'orbit_fn';
+  const NAMES = {
+    'cash-control':      'Cash Control',
+    'cob':               'COB',
+    'collections':       'Collections',
+    'dispute-triage':    'DISPUTE TRIAGE',
+    'disputes-intakes':  'Disputes and Intakes',
+    'iqt':               'IQT',
+    'non-cob':           'NON COB',
+    'prepay':            'Prepay'
+  };
+  const DEFAULT_FN = 'disputes-intakes';
+
+  // Bars hidden while a non-live function is selected
+  const HIDE_ON_UC = '.orbit-filters, .orbit-page-nav';
+
+  function isLive(btn) { return btn && btn.dataset.live === 'true'; }
+
+  function select(key, persist = true) {
+    const btn = document.querySelector(`.orbit-fn__btn[data-fn="${key}"]`);
+    if (!btn) return;
+
+    document.querySelectorAll('.orbit-fn__btn').forEach(b => {
+      b.classList.toggle('is-active', b === btn);
+      b.setAttribute('aria-current', b === btn ? 'true' : 'false');
+    });
+
+    const uc = document.getElementById('orbit-fn-uc');
+    if (isLive(btn)) {
+      document.querySelectorAll(HIDE_ON_UC).forEach(el => el.classList.remove('is-hidden'));
+      if (uc) uc.classList.add('is-hidden');
+      // Restore correct single-page visibility via the existing router
+      const active = document.querySelector('.orbit-page-tab.is-active');
+      PAGE_NAV.activate(active ? active.dataset.page : 'overview');
+    } else {
+      document.querySelectorAll(HIDE_ON_UC).forEach(el => el.classList.add('is-hidden'));
+      document.querySelectorAll('.orbit-page').forEach(p => p.classList.add('is-hidden'));
+      if (uc) {
+        document.getElementById('orbit-fn-uc-name').textContent = NAMES[key] || key;
+        uc.classList.remove('is-hidden');
+      }
+    }
+
+    if (persist) { try { localStorage.setItem(STORE_KEY, key); } catch (_) {} }
+  }
+
+  function init() {
+    const list = document.getElementById('orbit-fn-list');
+    if (!list) return;
+    list.querySelectorAll('.orbit-fn__btn').forEach(b =>
+      b.addEventListener('click', () => select(b.dataset.fn)));
+    let saved = null;
+    try { saved = localStorage.getItem(STORE_KEY); } catch (_) {}
+    const valid = saved && document.querySelector(`.orbit-fn__btn[data-fn="${saved}"]`);
+    select(valid ? saved : DEFAULT_FN, false);
+  }
+
+  return { init, select };
+})();
+
 document.addEventListener('DOMContentLoaded', () => {
+  FN.init();      // Payment Integrity function nav — restores last selection
   LP.init();
   NOTES.init();   // My Notes module — wires controls, renders badge from localStorage
 });

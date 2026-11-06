@@ -37,7 +37,7 @@
 
       <!-- ORBIT logo — official PNG asset (assets/logos/ORBIT.png) -->
       <div class="orbit-header__logo" aria-label="ORBIT logo" role="img">
-        <img src="ORBIT.png"
+        <img src="assets/logos/ORBIT.png"
              alt="ORBIT logo"
              class="orbit-header__img" />
       </div>
@@ -57,13 +57,44 @@
 
       <!-- Carelon Global Solutions — corporate sponsor, official PNG asset -->
       <div class="orbit-header__carelon" role="img" aria-label="Carelon Global Solutions">
-        <img src="carelon.png"
+        <img src="assets/logos/carelon.png"
              alt="Carelon Global Solutions"
              class="orbit-header__carelon-img" />
       </div>
 
     </div>
   </header>
+
+  <!-- ── Payment Integrity function navigation ─────────────── -->
+  <nav class="orbit-fn" role="navigation" aria-label="Payment Integrity functions">
+    <span class="orbit-fn__label">Functions</span>
+    <div class="orbit-fn__list" id="orbit-fn-list">
+      <button class="orbit-fn__btn" type="button" data-fn="cash-control" data-live="false">
+        Cash Control<span class="orbit-fn__badge orbit-fn__badge--soon">Soon</span>
+      </button>
+      <button class="orbit-fn__btn" type="button" data-fn="cob" data-live="false">
+        COB<span class="orbit-fn__badge orbit-fn__badge--soon">Soon</span>
+      </button>
+      <button class="orbit-fn__btn" type="button" data-fn="collections" data-live="false">
+        Collections<span class="orbit-fn__badge orbit-fn__badge--soon">Soon</span>
+      </button>
+      <button class="orbit-fn__btn" type="button" data-fn="dispute-triage" data-live="false">
+        DISPUTE TRIAGE<span class="orbit-fn__badge orbit-fn__badge--soon">Soon</span>
+      </button>
+      <button class="orbit-fn__btn is-active" type="button" data-fn="disputes-intakes" data-live="true">
+        Disputes and Intakes<span class="orbit-fn__badge orbit-fn__badge--live">Live</span>
+      </button>
+      <button class="orbit-fn__btn" type="button" data-fn="iqt" data-live="false">
+        IQT<span class="orbit-fn__badge orbit-fn__badge--soon">Soon</span>
+      </button>
+      <button class="orbit-fn__btn" type="button" data-fn="non-cob" data-live="false">
+        NON COB<span class="orbit-fn__badge orbit-fn__badge--soon">Soon</span>
+      </button>
+      <button class="orbit-fn__btn" type="button" data-fn="prepay" data-live="false">
+        Prepay<span class="orbit-fn__badge orbit-fn__badge--soon">Soon</span>
+      </button>
+    </div>
+  </nav>
 
   <!-- ── Filters ──────────────────────────────────────────── -->
   <nav class="orbit-filters" role="navigation" aria-label="Dashboard filters">
@@ -758,6 +789,7 @@
       <div class="lp-section__head">
         <h2 class="lp-section__title">PIP Watchlist</h2>
         <span class="lp-section__rule">Productivity &lt; 100% or QA &lt; 98.50% for 2 consecutive months</span>
+        <span class="lp-eval-window"></span>
       </div>
       <div class="lp-filters" aria-label="PIP watchlist filters">
         <div class="lp-filters__pills" id="lp-pip-pills">
@@ -801,6 +833,7 @@
       <div class="lp-section__head">
         <h2 class="lp-section__title">Recognition Watchlist</h2>
         <span class="lp-section__rule">Productivity &ge; 110% or QA = 100.00% for 3 consecutive months</span>
+        <span class="lp-eval-window"></span>
       </div>
       <div class="orbit-table-wrap">
         <table class="orbit-table lp-table" aria-label="Recognition watchlist">
@@ -1160,6 +1193,29 @@
        ORBIT FOOTER — Operational / Business Partner Branding
        Payment Integrity  |  IGNITE  |  Clinical Tower
        ══════════════════════════════════════════════════════════ -->
+  <!-- ── Under Construction landing (non-live functions) ───── -->
+  <section class="orbit-fn-uc is-hidden" id="orbit-fn-uc" role="region" aria-live="polite">
+    <div class="orbit-fn-uc__card">
+      <div class="orbit-fn-uc__badge">Under Construction</div>
+      <h2 class="orbit-fn-uc__name" id="orbit-fn-uc-name">Function</h2>
+      <p class="orbit-fn-uc__msg">
+        This module is reserved for future ORBIT integration.<br />
+        Operational data has not yet been onboarded.
+      </p>
+      <div class="orbit-fn-uc__modules">
+        <span class="orbit-fn-uc__modules-label">Expected Future Modules</span>
+        <ul class="orbit-fn-uc__module-list">
+          <li>KPI Dashboard</li>
+          <li>Productivity</li>
+          <li>Quality</li>
+          <li>Alerts</li>
+          <li>Associate Records</li>
+          <li>Reporting</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
   <footer class="orbit-footer" role="contentinfo" aria-label="Organizational branding">
 
     <!-- Gradient divider line above footer -->
@@ -1170,21 +1226,21 @@
 
       <!-- LEFT: Payment Integrity — official PNG asset -->
       <div class="orbit-footer__brand orbit-footer__brand--left">
-        <img src="pi.png"
+        <img src="assets/logos/pi.png"
              alt="Payment Integrity"
              class="orbit-footer__logo-img orbit-footer__pi-img" />
       </div>
 
       <!-- CENTER: Payment Integrity IGNITE — official PNG asset -->
       <div class="orbit-footer__brand orbit-footer__brand--center">
-        <img src="ignite.png"
+        <img src="assets/logos/ignite.png"
              alt="Payment Integrity IGNITE"
              class="orbit-footer__logo-img orbit-footer__ignite-img" />
       </div>
 
       <!-- RIGHT: Clinical Tower — official PNG asset (original file, not recreated) -->
       <div class="orbit-footer__brand orbit-footer__brand--right">
-        <img src="clinical-tower.png"
+        <img src="assets/logos/clinical-tower.png"
              alt="Clinical Tower — Clinical Services &amp; Specialized Business Operations"
              class="orbit-footer__logo-img orbit-footer__clinical-img" />
       </div>
@@ -1206,7 +1262,7 @@
 
     <!-- CDC emblem — original PNG asset, bottom-most footer row -->
     <div class="orbit-footer__cdc">
-      <img src="cdc-emblem.png"
+      <img src="assets/logos/cdc-emblem.png"
            alt="CDC emblem"
            class="orbit-footer__cdc-img" />
     </div>
