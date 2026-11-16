@@ -99,21 +99,148 @@ function qaStatus(score) {
 const idToName = {};
 D_ASSOC.forEach(r => { if (r.id && r.n) idToName[r.id] = r.n; });
 
+/* ── Function classification (roster = function authority) ────
+   Every record resolves to a Payment Integrity function key via
+   D_FN:  id -> byId  |  exact name -> byName  |  unique-last-name
+   + first-token fallback  |  'un' (unclassified).
+   D_DIM carries the CURRENT assignment (fn/am/mgr/pos/tower) —
+   authoritative for all filtering/KPIs. D_HIST holds movement
+   history and is display-only: it never overrides D_DIM.
+   CUR_FN scopes P()/Q()/MGRS(); FN nav switches it.            */
+let CUR_FN = 'disputes-intakes';
+try { const s = localStorage.getItem('orbit_fn'); if (s) CUR_FN = s; } catch (_) {}
+const FN_NAME_IDX = {};
+const FN_LAST_IDX = {};
+function normName(s) { return (s || '').trim().toLowerCase().replace(/\s+/g, ' '); }
+(function buildFnIdx() {
+  const M = (typeof D_FN !== 'undefined' && D_FN.byName) || {};
+  Object.keys(M).forEach(n => {
+    FN_NAME_IDX[normName(n)] = M[n];
+    const last = n.split(',')[0].trim().toLowerCase();
+    (FN_LAST_IDX[last] = FN_LAST_IDX[last] || []).push({ n, fn: M[n] });
+  });
+})();
+function fnOf(r) {
+  // 1. Pre-attached fn field (set by enrich_data.py via OPR ID → roster join)
+  //    Most reliable — covers all roster-matched D_QA rows without any lookup.
+  if (r.fn) return r.fn;
+  if (typeof D_FN === 'undefined' || !D_FN.byId) return CUR_FN;   // legacy data: unscoped
+  // 2. OPR ID → D_FN.byId (runtime fallback for rows not yet enriched)
+  if (r.id && D_FN.byId[r.id]) return D_FN.byId[r.id];
+  // 3. Exact roster name → D_FN.byName
+  const nm = normName(r.a || r.n || '');
+  if (FN_NAME_IDX[nm]) return FN_NAME_IDX[nm];
+  // 4. Unique last-name + first-token match
+  const cand = FN_LAST_IDX[nm.split(',')[0]];
+  if (cand && cand.length === 1) {
+    const tok  = (nm.split(',')[1] || '').trim().split(' ')[0];
+    const ctok = (normName(cand[0].n).split(',')[1] || '').trim().split(' ')[0];
+    if (tok && ctok && tok === ctok) return cand[0].fn;
+  }
+  return 'un';
+}
+// Production rows:
+//   D_PROD     — Disputes & Intakes only (existing authoritative source).
+//   D_PROD_EXT — All other Payment Integrity functions, built from data_prod.xlsx.
+//                Each row carries an explicit fn field matching D_DIM slugs.
+// P() is the single access point for production data throughout the app —
+// it returns the correct slice for whatever CUR_FN is active, ensuring all
+// downstream consumers (filterProd, computeKPIs, computeAssocTable, etc.)
+// work identically for every function without modification.
+//
+// ROSTER GATE — applied inside P() so every consumer is covered automatically:
+//   Only rows whose OPR ID (r.id) is present in D_DIM for CUR_FN are returned.
+//   Associates who are no longer on the current roster (resigned, transferred
+//   to another tower, or simply absent from D_DIM) are silently excluded from
+//   all dashboards, dropdowns, KPIs, and QA calculations in one place.
+//   Complete production history for CURRENT associates is preserved — an
+//   associate who transferred into their current function mid-year will show
+//   all prior months because those D_PROD_EXT rows carry their OPR ID.
+const PROD_FN = 'disputes-intakes';
+function P() {
+  if (typeof D_PROD_EXT === 'undefined') {
+    return CUR_FN === PROD_FN ? D_PROD : [];
+  }
+
+  // Build the allowed OPR ID set for the current function from D_DIM.
+  // This is recomputed on every P() call; it is a small Set (≤120 entries)
+  // so the cost is negligible vs. the correctness guarantee it provides.
+  const rosterIds = typeof D_DIM !== 'undefined'
+    ? new Set(D_DIM.filter(d => d.fn === CUR_FN).map(d => d.id).filter(Boolean))
+    : new Set();
+
+  if (CUR_FN === PROD_FN) {
+    // Merge D_PROD (authoritative) with D_PROD_EXT D&I rows (earlier months).
+    // D&I transferees have Jan–Jul in D_PROD_EXT and later months in D_PROD.
+    // De-duplicate by associate + date: D_PROD row wins when both exist.
+    // Apply roster gate: only current D&I roster associates are returned.
+    const seen = new Set(D_PROD.map(r => r.a + '|' + r.d));
+    const ext  = D_PROD_EXT.filter(r =>
+      r.fn === PROD_FN &&
+      !seen.has(r.a + '|' + r.d) &&
+      r.id && rosterIds.has(r.id)
+    );
+    // For D_PROD rows: they are keyed by name, not OPR ID.
+    // Gate by name against the current D&I roster names.
+    const rosterNames = typeof D_DIM !== 'undefined'
+      ? new Set(D_DIM.filter(d => d.fn === CUR_FN).map(d => d.n).filter(Boolean))
+      : new Set();
+    return [
+      ...D_PROD.filter(r => r.a && rosterNames.has(r.a)),
+      ...ext,
+    ];
+  }
+
+  // Non-D&I functions: gate exclusively by OPR ID against D_DIM current roster.
+  return D_PROD_EXT.filter(r => r.fn === CUR_FN && r.id && rosterIds.has(r.id));
+}
+function Q()    { return D_QA.filter(r => fnOf(r) === CUR_FN); }
+function MGRS() {
+  const s = [...new Set([...P(), ...Q()].map(r => r.m))].filter(Boolean).sort();
+  // QA-pending functions have no rows yet — fall back to roster managers
+  return s.length ? s : [...new Set(DIM_FN().map(d => d.mgr))].filter(Boolean).sort();
+}
+function DIM_FN() { return (typeof D_DIM !== 'undefined' ? D_DIM : []).filter(d => d.fn === CUR_FN); }
+const FMETA = () => (typeof FN !== 'undefined' && FN.META[CUR_FN]) || {};
+
+// Function-level data availability (independent of period filters):
+//  PENDING_PROD — no productivity extract exists for this function at all
+//  PENDING_QA   — source-system audits exist but detail rows aren't extracted
+let PENDING_PROD = false;
+let PENDING_QA   = false;
+function unclassifiedAssocCount() {
+  const s = new Set();
+  D_PROD.forEach(r => { if (r.a && fnOf(r) === 'un') s.add('n:' + r.a); });
+  D_QA.forEach(r => { if ((r.id || r.a) && fnOf(r) === 'un') s.add('i:' + (r.id || r.a)); });
+  return s.size;
+}
+
 /* ── Data filtering ─────────────────────────────────────────── */
 // Manager filter matches D_PROD[m] directly — period-aware because
 // each D_PROD row carries the manager valid for that specific ym.
 function filterProd(month, manager) {
-  return D_PROD.filter(r =>
+  return P().filter(r =>
     (manager === 'all' || r.m === manager) &&
     (month   === 'all' || r.ym === month)
   );
 }
 
-// QA manager filter matches D_QA[m] directly (same logic).
+// QA manager filter: matches D_QA[m] (historical) OR D_DIM[am] (current).
+// Associates moved to a new TL since their last audit still appear under
+// their current manager when that manager's filter is selected.
 function filterQA(month, manager) {
-  return D_QA.filter(r =>
-    (manager === 'all' || r.m === manager) &&
-    (month   === 'all' || r.d.startsWith(month))
+  if (manager === 'all') {
+    return Q().filter(r => month === 'all' || r.d.startsWith(month));
+  }
+  // Build a set of OPR IDs whose current D_DIM[am] matches the filter
+  const dimAMids = new Set(
+    (typeof D_DIM !== 'undefined' ? D_DIM : [])
+      .filter(d => d.am === manager || d.mgr === manager)
+      .map(d => d.id)
+  );
+  return Q().filter(r =>
+    (r.m === manager || dimAMids.has(r.id)) &&
+    (month === 'all' || r.d.startsWith(month))
   );
 }
 
@@ -155,47 +282,128 @@ function computeKPIs(prodRows, qaRows) {
 }
 
 /* ── Associate table computation ───────────────────────────── */
-// Manager = D_PROD[m] for the filtered period (period-aware).
-// When month filter is active, each associate's manager reflects
-// who managed them IN THAT MONTH — not a static Dim_Associate value.
+// PRIMARY KEY: OPR ID (D_QA[id] / D_DIM[id]).
+// One associate = one row regardless of manager history.
+// D_DIM is the authority for current name and current manager (am).
+// D_PROD[m] is used only as a period-aware manager override when
+// an associate appears in D_PROD (disputes-intakes / full-prod).
 function computeAssocTable(prodRows, qaRows) {
-  const assocMap = {};
+  const assocMap = {};  // key = OPR ID, or 'n:'+name for unclassified fallback
 
-  // Build from prod rows — group by associate name
-  // Manager for each associate = D_PROD[m] for rows in this filter window.
-  // If an associate appears under different managers in different months
-  // and month='all', we take the most recent manager (largest ym).
+  // Build D_DIM lookups: id -> dim row, name -> id
+  const dimById   = {};
+  const dimByName = {};
+  (typeof D_DIM !== 'undefined' ? D_DIM : []).forEach(d => {
+    if (d.id) dimById[d.id] = d;
+    if (d.n)  dimByName[d.n] = d.id;
+  });
+
+  // Helper: resolve the assocMap key for a name string.
+  // Returns OPR ID when known; falls back to 'n:'+name so unclassified
+  // associates still get one row (and don't collide with OPR-ID keys).
+  function keyFor(name) { return dimByName[name] || ('n:' + name); }
+
+  // Helper: current manager display string for a given OPR ID or name.
+  // D_DIM[am] = current assistant manager / TL — the roster-authoritative
+  // manager. Falls back to D_PROD[m] from the most recent filtered row.
+  function dimAM(id) {
+    const d = dimById[id];
+    return d ? (d.am || d.mgr || '') : '';
+  }
+
+  // ── 1. Build from D_PROD rows ───────────────────────────────
+  // Group by associate name, resolve to OPR ID key via D_DIM.
+  // For the manager field, prefer D_DIM[am] (roster-current);
+  // fall back to D_PROD[m] from the most recent period in the
+  // filter window (preserves period-aware behaviour when D_DIM lacks entry).
   const prodByAssoc = groupBy(prodRows, 'a');
   Object.entries(prodByAssoc).forEach(([name, rows]) => {
     if (!name) return;
-    const act = rows.reduce((s, r) => s + (r.act || 0), 0);
-    const tgt = rows.reduce((s, r) => s + (r.tgt || 0), 0);
-    // Most recent manager for this associate in the filtered window
+    const act    = rows.reduce((s, r) => s + (r.act || 0), 0);
+    const tgt    = rows.reduce((s, r) => s + (r.tgt || 0), 0);
+    const oid    = dimByName[name];
+    const mapKey = oid || ('n:' + name);
+    // Most recent D_PROD[m] for this associate in the filtered window
     const sorted  = [...rows].sort((a, b) => (a.ym > b.ym ? -1 : 1));
-    const manager = sorted[0].m;
-    assocMap[name] = { name, manager, act, tgt, qaCnt: 0, qaScr: 0 };
+    const manager = (oid ? dimAM(oid) : '') || sorted[0].m;
+    assocMap[mapKey] = { id: mapKey, name, manager, act, tgt, qaCnt: 0, qaScr: 0 };
   });
 
-  // Merge QA data — resolve domain ID → associate name via D_ASSOC lookup
+  // ── 2. Merge D_QA rows — keyed by OPR ID directly ──────────
+  // D_QA[id] IS the OPR ID. D_QA[a] is the roster-authoritative name
+  // for matched rows (fn !== 'un'); raw QA-system string otherwise.
   const qaByID = groupBy(qaRows, 'id');
   Object.entries(qaByID).forEach(([id, rows]) => {
-    // Resolve name: D_ASSOC lookup first, fallback to D_QA[a], fallback to id
-    const name = idToName[id] || rows[0].a || id;
-    if (!name) return;
+    if (!id) return;
+    const isMatched = rows[0].fn && rows[0].fn !== 'un';
+    // Name: D_DIM is authoritative when available, then D_QA[a], then id
+    const dimEntry  = dimById[id];
+    const name      = dimEntry ? dimEntry.n : (isMatched ? rows[0].a : (idToName[id] || rows[0].a || id));
+    const mapKey    = id;   // OPR ID is the canonical key for all QA rows
     const cnt  = rows.reduce((s, r) => s + (r.cnt || 0), 0);
     const wScr = rows.reduce((s, r) => s + (r.cnt || 0) * (r.scr || 0), 0);
-    if (!assocMap[name]) {
-      // QA-only associate: manager from D_QA[m]
-      assocMap[name] = { name, manager: rows[0].m, act: 0, tgt: 0, qaCnt: 0, qaScr: 0 };
+    // For unmatched rows (fn='un'): if the QA name exactly matches a D_PROD
+    // fallback key already in the map, merge into it rather than creating a
+    // second OPR-ID entry — this collapses unclassified prod+QA duplicates.
+    // Guard: only merge if this OPR ID has a single unambiguous name in D_QA
+    // (multiple names across rows = ambiguous ID, keep it separate).
+    const qaNames     = new Set(rows.map(r => r.a).filter(Boolean));
+    const fallbackKey = 'n:' + name;
+    const targetKey   = assocMap[mapKey] ? mapKey
+                      : (!isMatched && qaNames.size === 1 && assocMap[fallbackKey]) ? fallbackKey
+                      : mapKey;
+    if (!assocMap[targetKey]) {
+      // QA-only associate: manager from D_DIM[am], fallback D_QA[m] most-recent
+      const sortedQ  = [...rows].sort((a, b) => (a.d > b.d ? -1 : 1));
+      const manager  = dimAM(id) || sortedQ[0].m || '';
+      assocMap[targetKey] = { id: targetKey, name, manager, act: null, tgt: null, qaCnt: 0, qaScr: 0 };
+    } else {
+      // Already seeded from D_PROD; ensure name uses D_DIM / enriched value
+      if (dimEntry && dimEntry.n) assocMap[targetKey].name = dimEntry.n;
     }
-    assocMap[name].qaCnt += cnt;
-    assocMap[name].qaScr += wScr;
+    assocMap[targetKey].qaCnt += cnt;
+    assocMap[targetKey].qaScr += wScr;
   });
 
-  return Object.values(assocMap).map(r => ({
+  // ── 3. Roster fallback ──────────────────────────────────────
+  // Every currently-assigned associate appears even with no data yet —
+  // productivity-pending functions still show their full roster.
+  // Key by OPR ID so roster entries never duplicate QA or PROD entries.
+  if (PENDING_PROD) {
+    DIM_FN().forEach(d => {
+      if (!d.id || assocMap[d.id]) return;
+      assocMap[d.id] = { id: d.id, name: d.n, manager: d.am || d.mgr || '', act: null, tgt: null, qaCnt: 0, qaScr: 0 };
+    });
+  }
+
+  // ── 4. Roster membership gate ───────────────────────────────
+  // Current roster (D_DIM, current function) is the ONLY population
+  // that should appear in operational dashboards.  Associates who have
+  // resigned, transferred to another tower, or are otherwise no longer
+  // in this function's D_DIM entry must not appear in KPIs or grids.
+  //
+  // Build the allowed set:
+  //   • OPR ID keys   → must exist in D_DIM with fn === CUR_FN
+  //   • 'n:name' keys → must exist in D_DIM (by name) with fn === CUR_FN
+  //     (these arise from D_PROD name-only rows for the D&I function)
+  const dimFnIds   = new Set(DIM_FN().map(d => d.id).filter(Boolean));
+  const dimFnNames = new Set(DIM_FN().map(d => d.n).filter(Boolean));
+
+  const filtered = {};
+  Object.entries(assocMap).forEach(([key, row]) => {
+    if (key.startsWith('n:')) {
+      // Name-keyed entry: allow only if the name is in the current-fn roster
+      if (dimFnNames.has(row.name)) filtered[key] = row;
+    } else {
+      // OPR-ID-keyed entry: allow only if the ID is in the current-fn roster
+      if (dimFnIds.has(key)) filtered[key] = row;
+    }
+  });
+
+  return Object.values(filtered).map(r => ({
     ...r,
-    variance: r.act - r.tgt,
-    prodPct:  r.tgt > 0 ? r.act / r.tgt : 0,
+    variance: r.act == null ? null : r.act - (r.tgt || 0),
+    prodPct:  (r.tgt || 0) > 0 ? r.act / r.tgt : null,
     avgQA:    r.qaCnt > 0 ? r.qaScr / r.qaCnt : null,
   }));
 }
@@ -236,6 +444,19 @@ Chart.defaults.font.size   = 11;
 Chart.defaults.plugins.legend.display = false;
 
 function destroyChart(ref) { if (ref) { try { ref.destroy(); } catch(e) {} } }
+
+// Overlay message inside a chart-body — used for "Pending Integration" /
+// "Pending Extract" states without changing the dashboard layout.
+function setChartPending(canvasId, msg) {
+  const c = document.getElementById(canvasId);
+  if (!c || !c.parentElement) return;
+  const wrap = c.parentElement;
+  let el = wrap.querySelector('.chart-pending');
+  if (msg) {
+    if (!el) { el = document.createElement('div'); el.className = 'chart-pending'; wrap.appendChild(el); }
+    el.textContent = msg;
+  } else if (el) el.remove();
+}
 
 function renderTrendChart(weeklyData) {
   const canvas = document.getElementById('chart-trend');
@@ -444,15 +665,19 @@ function renderTable(assocRows) {
   }
 
   const maxPct = Math.max(...sorted.map(r => r.prodPct || 0), 0.01);
+  const PEND_I = '<span class="cell-pending">Pending Integration</span>';
+  const PEND_E = '<span class="cell-pending">Pending Extract</span>';
+  const numOr = v => v == null ? (PENDING_PROD ? PEND_I : '—') : fmt.num(v);
   const rows = sorted.map((r, i) => {
-    const pct      = r.prodPct || 0;
-    const barW     = clamp(Math.round((pct / Math.max(maxPct, 1.2)) * 100), 0, 100);
-    const barClass = pct >= 1.0 ? 'is-above' : pct < 0.9 ? 'is-below' : '';
-    const varClass = r.variance >= 0 ? 'is-positive' : 'is-negative';
+    const pct      = r.prodPct;
+    const barW     = pct == null ? 0 : clamp(Math.round((pct / Math.max(maxPct, 1.2)) * 100), 0, 100);
+    const barClass = pct == null ? '' : pct >= 1.0 ? 'is-above' : pct < 0.9 ? 'is-below' : '';
+    const varClass = r.variance == null ? '' : r.variance >= 0 ? 'is-positive' : 'is-negative';
     const qaScore  = r.avgQA;
     const qaSt     = qaStatus(qaScore);   // 'pass' | 'fail' | null
     const qaClass  = qaSt === 'pass' ? 'is-pass' : qaSt === 'fail' ? 'is-fail' : '';
-    const qaStr    = qaScore != null ? fmt.pct(qaScore) : '—';
+    const qaStr    = qaScore != null ? fmt.pct(qaScore)
+                   : (PENDING_QA && r.qaCnt === 0 ? PEND_E : '—');
     // Badge: dot + label, tooltip shows threshold
     const qaBadge  = qaSt != null
       ? `<span class="qa-badge qa-badge--${qaSt}" title="PI QA threshold: 98.50%">${qaSt === 'pass' ? '● PASS' : '● FAIL'}</span>`
@@ -462,12 +687,12 @@ function renderTable(assocRows) {
       <td class="col-rank">${i + 1}</td>
       <td class="col-associate">${escHtml(r.name)}</td>
       <td class="col-manager">${escHtml(r.manager)}</td>
-      <td class="col-num">${fmt.num(r.act)}</td>
-      <td class="col-num">${fmt.num(r.tgt)}</td>
-      <td class="col-variance ${varClass}">${fmt.sign(r.variance)}</td>
+      <td class="col-num">${numOr(r.act)}</td>
+      <td class="col-num">${numOr(r.tgt)}</td>
+      <td class="col-variance ${varClass}">${r.variance == null ? (PENDING_PROD ? PEND_I : '—') : fmt.sign(r.variance)}</td>
       <td class="col-pct">
         <div class="pct-cell">
-          <span class="pct-cell__value">${fmt.pct(pct)}</span>
+          <span class="pct-cell__value">${pct == null ? (PENDING_PROD ? PEND_I : '—') : fmt.pct(pct)}</span>
           <div class="pct-cell__bar-track">
             <div class="pct-cell__bar-fill ${barClass}" style="width:${barW}%"></div>
           </div>
@@ -488,15 +713,29 @@ function renderTable(assocRows) {
 /* ── KPI cards ──────────────────────────────────────────────── */
 function renderKPIs(kpis) {
   const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
-  set('kpi-actual',   fmt.num(kpis.totalAct));
-  set('kpi-target',   fmt.num(kpis.totalTgt));
-  set('kpi-pct',      fmt.pct(kpis.prodPct));
-  set('kpi-qa-score', kpis.avgQA > 0 ? fmt.pct(kpis.avgQA) : '—');
-  set('kpi-qa-count', fmt.num(kpis.totalCnt));
-  set('kpi-audited',  fmt.num(kpis.audited));
+  const pend = id => { const el = document.getElementById(id); if (el) el.classList.add('kpi-value--pending'); };
+  const unpend = id => { const el = document.getElementById(id); if (el) el.classList.remove('kpi-value--pending'); };
+  const meta = FMETA();
+
+  // Productivity — pending when the function has no extract at all
+  set('kpi-actual', PENDING_PROD ? 'Pending Integration' : fmt.num(kpis.totalAct));
+  set('kpi-target', PENDING_PROD ? 'Pending Integration' : fmt.num(kpis.totalTgt));
+  set('kpi-pct',    PENDING_PROD ? 'Pending Integration' : fmt.pct(kpis.prodPct));
+  ['kpi-actual','kpi-target','kpi-pct'].forEach(id => PENDING_PROD ? pend(id) : unpend(id));
+
+  // QA — 'Pending Extract' when source audits exist but no detail rows yet
+  set('kpi-qa-score', kpis.avgQA > 0 ? fmt.pct(kpis.avgQA) : PENDING_QA ? 'Pending Extract' : '—');
+  set('kpi-qa-count', PENDING_QA ? meta.qa_src.toLocaleString() : fmt.num(kpis.totalCnt));
+  set('kpi-audited',  PENDING_QA ? 'Pending Extract' : fmt.num(kpis.audited));
+  ['kpi-qa-score','kpi-qa-count','kpi-audited'].forEach(id => (PENDING_QA && id !== 'kpi-qa-count') ? pend(id) : unpend(id));
+  const qaCntSub = document.querySelector('.kpi-card--qa-count .kpi-sub');
+  if (qaCntSub) qaCntSub.textContent = PENDING_QA ? 'source system — extract pending' : 'Total transactions';
 
   const pctEl = document.getElementById('kpi-pct-sub');
-  if (pctEl) {
+  if (pctEl && PENDING_PROD) {
+    pctEl.className = 'kpi-sub';
+    pctEl.textContent = 'productivity onboarding in progress';
+  } else if (pctEl) {
     const delta = kpis.prodPct - 1.0;
     pctEl.className = delta >= 0 ? 'kpi-sub kpi-sub--up' : 'kpi-sub kpi-sub--down';
     pctEl.textContent = (delta >= 0 ? '+' : '') + (delta * 100).toFixed(1) + '% vs target';
@@ -529,9 +768,14 @@ function renderKPIs(kpis) {
       qaCard.classList.add(st === 'pass' ? 'kpi-card--qa-pass' : 'kpi-card--qa-fail');
     }
   } else {
-    // No QA data
+    // No QA data in extract — distinguish "extract pending" from "no data"
     if (qaValEl) qaValEl.classList.remove('qa-kpi-pass', 'qa-kpi-fail');
-    if (qaEl) { qaEl.className = 'kpi-sub'; qaEl.textContent = 'No audit data'; }
+    if (qaEl) {
+      qaEl.className = 'kpi-sub';
+      qaEl.textContent = PENDING_QA
+        ? `${meta.qa_src.toLocaleString()} audits in source system — extraction pending`
+        : 'No audit data';
+    }
     if (qaCard) qaCard.classList.remove('kpi-card--qa-pass', 'kpi-card--qa-fail');
   }
 
@@ -566,7 +810,7 @@ function renderEnterpriseKPIs() {
       entVEl.textContent = '—';
     } else {
       // Full-month total across ALL managers — true enterprise view, ignores manager filter.
-      const allMonthProd = D_PROD.filter(r => r.ym === STATE.month);
+      const allMonthProd = P().filter(r => r.ym === STATE.month);
       const totalActFull = allMonthProd.reduce((s, r) => s + (r.act || 0), 0);
       const variance     = Math.round((totalActFull - ent.target) * 100) / 100;
       entVEl.textContent = fmt.sign(variance);
@@ -595,7 +839,13 @@ function updatePeriodBadge() {
 function buildMonthPills() {
   const container = document.getElementById('month-pills');
   if (!container) return;
-  const months = uniqueSorted(D_PROD, 'ym');
+  container.innerHTML = '';   // rebuild is idempotent — function switching must not duplicate pills
+  // Timeline covers prod months AND QA audit months (QA-only functions
+  // still need a period filter for their QA data).
+  const months = [...new Set([
+    ...P().map(r => r.ym),
+    ...Q().map(r => r.d && r.d.slice(0, 7)),
+  ].filter(Boolean))].sort();
 
   const allPill = document.createElement('button');
   allPill.className = 'orbit-pill is-active';
@@ -618,10 +868,19 @@ function buildMonthPills() {
 
 function setMonth(m) {
   STATE.month = m;
-  document.querySelectorAll('.orbit-pill').forEach(p => {
+  document.querySelectorAll('#month-pills .orbit-pill').forEach(p => {
     p.classList.toggle('is-active', p.dataset.month === m);
   });
   refresh();
+  rerenderActivePage();
+}
+
+// Re-render whichever page is visible (Daily/Monthly/Leadership share
+// the global Timeline — the filter bar is the single control).
+function rerenderActivePage() {
+  const active = document.querySelector('.orbit-page-tab.is-active');
+  const page = active ? active.dataset.page : 'overview';
+  if (page !== 'overview') PAGE_NAV.rerender(page);
 }
 
 /* ── Manager dropdown ───────────────────────────────────────── */
@@ -632,17 +891,18 @@ function buildManagerSelect() {
   if (!sel) return;
 
   sel.innerHTML = '<option value="all">All Managers</option>';
-  D_MANAGERS.forEach(m => {
+  MGRS().forEach(m => {
     const opt = document.createElement('option');
     opt.value = m;
     opt.textContent = m;
     sel.appendChild(opt);
   });
 
-  sel.addEventListener('change', () => {
+  sel.onchange = () => {   // property handler — safe to rebuild on function switch
     STATE.manager = sel.value;
     refresh();
-  });
+    rerenderActivePage();
+  };
 }
 
 /* ── Sort ───────────────────────────────────────────────────── */
@@ -692,6 +952,11 @@ function initTableSearch() {
 
 /* ── Main refresh ───────────────────────────────────────────── */
 function refresh() {
+  // Function-level availability (unfiltered) — filters can empty the
+  // window without meaning the function lacks data.
+  PENDING_PROD = P().length === 0;
+  PENDING_QA   = Q().length === 0 && !!(FMETA().qa_src);
+
   const prod     = filterProd(STATE.month, STATE.manager);
   const qa       = filterQA(STATE.month, STATE.manager);
   const kpis     = computeKPIs(prod, qa);
@@ -706,6 +971,12 @@ function refresh() {
   trendChart = renderTrendChart(weekly);
   qaChart    = renderQAChart(qaMonths);
 
+  // Empty-state overlays — layout stays identical, only data changes
+  setChartPending('chart-trend',
+    PENDING_PROD ? 'Pending Integration' : weekly.length ? null : 'No data for current filters');
+  setChartPending('chart-qa',
+    qaMonths.length ? null : (PENDING_QA ? 'Pending Extract' : 'No audit data'));
+
   const ts = document.getElementById('last-updated');
   if (ts) ts.textContent = 'Updated ' + new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
 }
@@ -718,6 +989,7 @@ function init() {
   initTableSearch();
   updateSortUI();
   refresh();
+  PAGE_NAV.register('overview', refresh);   // enables FN function-switch re-render
 
   const loader = document.getElementById('orbit-loading');
   if (loader) { loader.classList.add('is-hidden'); setTimeout(() => loader.remove(), 500); }
@@ -732,9 +1004,13 @@ document.addEventListener('DOMContentLoaded', init);
    this so the Leadership tab activation triggers renderAll.   */
 const PAGE_NAV = (() => {
   const firstRender = {};   // pageId → callback run once on first open
+  const renderers   = {};   // pageId → persistent render callback (FN re-render)
   let ready = false;
 
-  function register(pageId, cb) { firstRender[pageId] = cb; }
+  function register(pageId, cb) { firstRender[pageId] = cb; renderers[pageId] = cb; }
+
+  // Re-render a page in place (used by FN when the active function changes)
+  function rerender(target) { if (renderers[target]) renderers[target](); }
 
   function activate(target, opts = {}) {
     document.querySelectorAll('.orbit-page-tab').forEach(t => {
@@ -758,7 +1034,7 @@ const PAGE_NAV = (() => {
     });
   }
 
-  return { init, register, activate };
+  return { init, register, activate, rerender };
 })();
 
 document.addEventListener('DOMContentLoaded', PAGE_NAV.init);
@@ -799,7 +1075,7 @@ const DD = (() => {
   function filteredRows() {
     const q        = S.search.toLowerCase().trim();
     const dateStr  = isoToMdY(S.date);   // '' when no date selected
-    return D_PROD.filter(r => {
+    return P().filter(r => {
       if (S.month   !== 'all' && r.ym !== S.month)        return false;
       if (S.manager !== 'all' && r.m  !== S.manager)       return false;
       if (S.assoc   !== 'all' && r.a  !== S.assoc)         return false;
@@ -861,7 +1137,35 @@ const DD = (() => {
     </tr>`;
   }
 
+  // Full reset — called on every function switch.
+  // Clears all local filter state so the new function's data renders
+  // cleanly with no stale manager / associate / date selections.
+  function reset() {
+    S.month   = STATE.month;
+    S.manager = 'all';
+    S.assoc   = 'all';
+    S.date    = '';
+    S.search  = '';
+    // Clear date picker and search input DOM elements
+    const dateInp = document.getElementById('dd-date-input');
+    const dateClear = document.getElementById('dd-date-clear');
+    const searchInp = document.getElementById('dd-search');
+    if (dateInp)  { dateInp.value = ''; if (dateInp.min) dateInp.min = ''; if (dateInp.max) dateInp.max = ''; }
+    if (dateClear) dateClear.classList.add('is-hidden');
+    if (searchInp) searchInp.value = '';
+    // Reset manager select DOM to 'all'
+    const mgrSel = document.getElementById('dd-manager-select');
+    if (mgrSel) mgrSel.value = 'all';
+    // Rebuild pills and dropdowns against the new function's data
+    buildMonthPills();
+    buildManagerSelect();
+    rebuildAssocSelect();   // repopulate from Q()/DIM_FN() for the new function
+  }
+
   function render() {
+    S.month = STATE.month;   // single global Timeline drives all pages
+    if (S.month !== 'all') syncDateToMonth();
+    rebuildAssocSelect();
     ddPage = 1;   // filter/sort changes always reset to page 1
     renderPage();
   }
@@ -907,7 +1211,8 @@ const DD = (() => {
   function buildMonthPills() {
     const container = document.getElementById('dd-month-pills');
     if (!container) return;
-    const months = uniqueSorted(D_PROD, 'ym');
+    container.innerHTML = '';   // clear before rebuild — prevents doubled pills on FN switch
+    const months = uniqueSorted(P(), 'ym');
 
     const allBtn = document.createElement('button');
     allBtn.className = 'orbit-pill' + (S.month === 'all' ? ' is-active' : '');
@@ -944,18 +1249,21 @@ const DD = (() => {
     const sel = document.getElementById('dd-manager-select');
     if (!sel) return;
     sel.innerHTML = '<option value="all">All Managers</option>';
-    D_MANAGERS.forEach(m => {
+    MGRS().forEach(m => {
       const opt = document.createElement('option');
       opt.value = m;
       opt.textContent = m;
       sel.appendChild(opt);
     });
-    sel.addEventListener('change', () => {
+    sel.value = S.manager;   // restore current selection (or reset to 'all' if gone)
+    if (!sel.value) sel.value = 'all';
+    // Property assignment replaces any previous listener — safe to call on FN switch
+    sel.onchange = () => {
       S.manager = sel.value;
       S.assoc   = 'all';
       rebuildAssocSelect();
       render();
-    });
+    };
   }
 
   /* ── Build associate dropdown (responds to manager filter) ── */
@@ -973,12 +1281,22 @@ const DD = (() => {
     const sel = document.getElementById('dd-assoc-select');
     if (!sel) return;
     const prev = sel.value;
-    const assocs = [...new Set(
-      D_PROD
-        .filter(r => (S.month === 'all' || r.ym === S.month) && (S.manager === 'all' || r.m === S.manager))
-        .map(r => r.a)
-        .filter(Boolean)
-    )].sort();
+    // Source hierarchy: Q() names (function-scoped QA data) → P() names
+    // (D&I prod data) → DIM_FN() roster fallback for functions with no rows yet.
+    // Q() is primary so COB/IQT/etc. see their own associates, not D&I names.
+    const qaRows = Q().filter(r =>
+      (S.month   === 'all' || r.d.startsWith(S.month)) &&
+      (S.manager === 'all' || r.m === S.manager)
+    );
+    const prodRows = P().filter(r =>
+      (S.month   === 'all' || r.ym === S.month) &&
+      (S.manager === 'all' || r.m  === S.manager)
+    );
+    const fromData = [...new Set([...qaRows.map(r => r.a), ...prodRows.map(r => r.a)].filter(Boolean))].sort();
+    // Fallback to roster when function has no data rows yet
+    const assocs = fromData.length
+      ? fromData
+      : DIM_FN().map(d => d.n).filter(Boolean).sort();
     sel.innerHTML = '<option value="all">All Associates</option>';
     assocs.forEach(a => {
       const opt = document.createElement('option');
@@ -1121,7 +1439,7 @@ const DD = (() => {
     // render() is deferred — called on first activation of #page-daily
   }
 
-  return { init, render };
+  return { init, render, reset };
 })();
 
 /* ── Attach DD init to DOMContentLoaded alongside main init ── */
@@ -1166,12 +1484,12 @@ const MP = (() => {
   /* ── Core computation ────────────────────────────────────── */
   // Returns one row per (associate × month): { a, m, ym, act, tgt, prodPct, avgQA }
   function computeRows() {
-    const prodRows = D_PROD.filter(r =>
+    const prodRows = P().filter(r =>
       (S.month   === 'all' || r.ym === S.month) &&
       (S.manager === 'all' || r.m  === S.manager) &&
       (S.assoc   === 'all' || r.a  === S.assoc)
     );
-    const qaRows = D_QA.filter(r =>
+    const qaRows = Q().filter(r =>
       (S.month   === 'all' || r.d.startsWith(S.month)) &&
       (S.manager === 'all' || r.m  === S.manager)
     );
@@ -1719,6 +2037,7 @@ const MP = (() => {
 
   /* ── Master render ───────────────────────────────────────── */
   function render() {
+    S.month = STATE.month;   // single global Timeline drives all pages
     const rows       = computeRows();
     const monthRows  = computeMonthTrend(rows);
     renderKPIs(rows);
@@ -1729,11 +2048,25 @@ const MP = (() => {
     renderDistChart(rows);
   }
 
+  // Full reset — called on every function switch.
+  // Clears all local filter state so the new function's data renders
+  // cleanly with no stale manager / associate selections.
+  function reset() {
+    S.month   = STATE.month;
+    S.manager = 'all';
+    S.assoc   = 'all';
+    // Rebuild pills and dropdowns against the new function's data
+    buildMonthPills();
+    buildManagerSelect();
+    rebuildAssocSelect();   // repopulate from Q()/DIM_FN() for the new function
+  }
+
   /* ── Filter controls ─────────────────────────────────────── */
   function buildMonthPills() {
     const container = document.getElementById('mp-month-pills');
     if (!container) return;
-    const months = uniqueSorted(D_PROD, 'ym');
+    container.innerHTML = '';   // clear before rebuild — prevents doubled pills on FN switch
+    const months = uniqueSorted(P(), 'ym');
 
     const mkBtn = (val, label) => {
       const b = document.createElement('button');
@@ -1746,7 +2079,8 @@ const MP = (() => {
     container.appendChild(mkBtn('all', 'All'));
     months.forEach(ym => container.appendChild(mkBtn(ym, ym)));
 
-    container.addEventListener('click', e => {
+    // Replace listener — use onclick so rebuilding does not stack listeners
+    container.onclick = e => {
       const btn = e.target.closest('[data-month]');
       if (!btn) return;
       S.month = btn.dataset.month;
@@ -1754,43 +2088,57 @@ const MP = (() => {
         b.classList.toggle('is-active', b === btn));
       rebuildAssocSelect();
       render();
-    });
+    };
   }
 
   function buildManagerSelect() {
     const sel = document.getElementById('mp-manager-select');
     if (!sel) return;
     sel.innerHTML = '<option value="all">All Managers</option>';
-    D_MANAGERS.forEach(m => {
+    MGRS().forEach(m => {
       const o = document.createElement('option');
       o.value = m; o.textContent = m;
       sel.appendChild(o);
     });
-    sel.addEventListener('change', () => {
+    sel.value = S.manager;
+    if (!sel.value) sel.value = 'all';
+    // Property assignment replaces any previous listener — safe to call on FN switch
+    sel.onchange = () => {
       S.manager = sel.value;
       S.assoc   = 'all';
       rebuildAssocSelect();
       render();
-    });
+    };
   }
 
   function buildAssocSelect() {
     rebuildAssocSelect();
-    document.getElementById('mp-assoc-select')
-      ?.addEventListener('change', e => { S.assoc = e.target.value; render(); });
+    // Property assignment — safe to call multiple times without stacking listeners
+    const mpSel = document.getElementById('mp-assoc-select');
+    if (mpSel) mpSel.onchange = e => { S.assoc = e.target.value; render(); };
   }
 
   function rebuildAssocSelect() {
     const sel = document.getElementById('mp-assoc-select');
     if (!sel) return;
     const prev = sel.value;
-    const assocs = [...new Set(
-      D_PROD
-        .filter(r =>
-          (S.month   === 'all' || r.ym === S.month) &&
-          (S.manager === 'all' || r.m  === S.manager))
-        .map(r => r.a).filter(Boolean)
-    )].sort();
+    // Source hierarchy: Q() names (function-scoped) → P() names (D&I prod) →
+    // DIM_FN() roster fallback for functions with no data yet.
+    // Q() is the primary source because every non-D&I function is QA-only;
+    // using Q() ensures COB/IQT/etc. see their own associates, not D&I names.
+    const qaRows = Q().filter(r =>
+      (S.month   === 'all' || r.d.startsWith(S.month)) &&
+      (S.manager === 'all' || r.m === S.manager)
+    );
+    const prodRows = P().filter(r =>
+      (S.month   === 'all' || r.ym === S.month) &&
+      (S.manager === 'all' || r.m  === S.manager)
+    );
+    const fromData = [...new Set([...qaRows.map(r => r.a), ...prodRows.map(r => r.a)].filter(Boolean))].sort();
+    // Fallback to roster when function has no rows yet
+    const assocs = fromData.length
+      ? fromData
+      : DIM_FN().map(d => d.n).filter(Boolean).sort();
     sel.innerHTML = '<option value="all">All Associates</option>';
     assocs.forEach(a => {
       const o = document.createElement('option');
@@ -1841,7 +2189,7 @@ const MP = (() => {
     // render() is deferred — called on first activation of #page-monthly
   }
 
-  return { init, render };
+  return { init, render, reset };
 })();
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -2111,7 +2459,7 @@ const LP = (() => {
      Same merge logic as Monthly Performance page. */
   function computeRows() {
     const prodMap = {};
-    D_PROD.forEach(r => {
+    P().forEach(r => {
       if (!r.a || !r.ym) return;
       const key = r.a + '|' + r.ym;
       if (!prodMap[key]) prodMap[key] = { a: r.a, m: r.m, ym: r.ym, act: 0, tgt: 0 };
@@ -2120,7 +2468,7 @@ const LP = (() => {
     });
 
     const qaMap = {};
-    D_QA.forEach(r => {
+    Q().forEach(r => {
       const name = idToName[r.id] || r.a || r.id;
       if (!name || !r.d) return;
       const ym = r.d.substring(0, 7);
@@ -3471,6 +3819,7 @@ Powered by Payment Integrity IGNITE
     initModal();
     initSubNav();
     applyAccess();           // restores session + shows/hides portal tab
+    PAGE_NAV.register('leadership', renderAll);   // FN function-switch re-render
   }
 
   return { init, applyAccess, showSub };
@@ -3553,8 +3902,8 @@ const AR = (() => {
   function allAssocs() {
     // Step 1: filter D_PROD to the selected month (or all months)
     const rows = S.month === 'all'
-      ? D_PROD.filter(r => r.a)
-      : D_PROD.filter(r => r.a && r.ym === S.month);
+      ? P().filter(r => r.a)
+      : P().filter(r => r.a && r.ym === S.month);
 
     // Step 2: group by associate; for each group pick the most-recent ym's manager
     // (handles 'all' correctly when an associate has transferred mid-year)
@@ -3983,7 +4332,7 @@ const AR = (() => {
     const sel = document.getElementById('ar-month');
     if (!sel) return;
     // Derive available months from D_PROD (same source of truth as Overview pills)
-    const months = [...new Set(D_PROD.map(r => r.ym).filter(Boolean))].sort();
+    const months = [...new Set(P().map(r => r.ym).filter(Boolean))].sort();
     const keep   = sel.value || 'all';
     sel.innerHTML = '<option value="all">All Months</option>' +
       months.map(ym => `<option value="${esc(ym)}">${esc(ym)}</option>`).join('');
@@ -4535,39 +4884,107 @@ const FN = (() => {
   // Bars hidden while a non-live function is selected
   const HIDE_ON_UC = '.orbit-filters, .orbit-page-nav';
 
-  function isLive(btn) { return btn && btn.dataset.live === 'true'; }
+  // Maturity per function from D_FN_META: 'full' | 'qa' | 'prod' | 'uc'
+  const META = {};
+  (typeof D_FN_META !== 'undefined' ? D_FN_META : []).forEach(m => { META[m.key] = m; });
+
+  function stateOf(btn) {
+    const v = btn && btn.dataset.live;
+    return (v === 'full' || v === 'qa' || v === 'prod') ? v : 'uc';
+  }
+  function isLive(btn) { return stateOf(btn) !== 'uc'; }
+
+  // Hydrate button data-live + badge from D_FN_META (markup is the fallback)
+  function hydrate() {
+    document.querySelectorAll('.orbit-fn__btn').forEach(b => {
+      const meta  = META[b.dataset.fn];
+      const state = meta ? meta.state
+                       : (b.dataset.live === 'true' ? 'full' : 'uc');
+      b.dataset.live = state;
+      const badge = b.querySelector('.orbit-fn__badge');
+      if (badge) {
+        badge.className = 'orbit-fn__badge ' +
+          (state === 'uc' ? 'orbit-fn__badge--soon' : 'orbit-fn__badge--live');
+        badge.textContent =
+          state === 'uc' ? 'Soon' : (state === 'qa' ? 'QA' : 'Live');
+      }
+    });
+  }
+
+  function setViews({ bars, pages, uc, qv }) {
+    document.querySelectorAll(HIDE_ON_UC).forEach(el =>
+      el.classList.toggle('is-hidden', !bars));
+    document.querySelectorAll('.orbit-page').forEach(p =>
+      p.classList.toggle('is-hidden', !pages ? true : p.classList.contains('is-hidden')));
+    const ucEl = document.getElementById('orbit-fn-uc');
+    if (ucEl) ucEl.classList.toggle('is-hidden', !uc);
+  }
 
   function select(key, persist = true) {
     const btn = document.querySelector(`.orbit-fn__btn[data-fn="${key}"]`);
     if (!btn) return;
+
+    const changed = CUR_FN !== key;
+    CUR_FN = key;
 
     document.querySelectorAll('.orbit-fn__btn').forEach(b => {
       b.classList.toggle('is-active', b === btn);
       b.setAttribute('aria-current', b === btn ? 'true' : 'false');
     });
 
-    const uc = document.getElementById('orbit-fn-uc');
-    if (isLive(btn)) {
-      document.querySelectorAll(HIDE_ON_UC).forEach(el => el.classList.remove('is-hidden'));
-      if (uc) uc.classList.add('is-hidden');
-      // Restore correct single-page visibility via the existing router
-      const active = document.querySelector('.orbit-page-tab.is-active');
-      PAGE_NAV.activate(active ? active.dataset.page : 'overview');
-    } else {
-      document.querySelectorAll(HIDE_ON_UC).forEach(el => el.classList.add('is-hidden'));
-      document.querySelectorAll('.orbit-page').forEach(p => p.classList.add('is-hidden'));
-      if (uc) {
-        document.getElementById('orbit-fn-uc-name').textContent = NAMES[key] || key;
-        uc.classList.remove('is-hidden');
+    const state = stateOf(btn);
+    if (state === 'full' || state === 'prod' || state === 'qa') {
+      // Maturity affects data availability, never layout — every live
+      // function uses the identical ORBIT dashboard.
+      setViews({ bars: true, pages: true, uc: false, qv: false });
+      // Function switch resets the period filters — months/managers
+      // are rebuilt against the newly scoped dataset.
+      if (changed) {
+        STATE.month = 'all'; STATE.manager = 'all';
+        buildMonthPills(); buildManagerSelect();
+        // Reset DD and MP local filter state and rebuild their controls
+        // so they show data from the new function without stale manager /
+        // associate / date selections from the previous function.
+        // reset() also re-registers their onChange handlers (no listener stacking).
+        DD.reset();
+        MP.reset();
+        // Invalidate lazy-first-render flags so the user gets a fresh render
+        // when they open Daily Detail or Monthly Performance next time, even if
+        // they had already visited those tabs under the previous function.
+        PAGE_NAV.register('daily',   () => DD.render());
+        PAGE_NAV.register('monthly', () => MP.render());
       }
+      const active = document.querySelector('.orbit-page-tab.is-active');
+      const page = active ? active.dataset.page : 'overview';
+      PAGE_NAV.activate(page);
+      PAGE_NAV.rerender(page);
+    } else {
+      setViews({ bars: false, pages: false, uc: true, qv: false });
+      const el = document.getElementById('orbit-fn-uc-name');
+      if (el) el.textContent = NAMES[key] || key;
     }
+    updateUnChip();
 
     if (persist) { try { localStorage.setItem(STORE_KEY, key); } catch (_) {} }
+  }
+
+  // Admin-only diagnostic: associates that failed classification.
+  function updateUnChip() {
+    const chip = document.getElementById('orbit-fn-un');
+    if (!chip || typeof AUTH === 'undefined') return;
+    if (AUTH.role() === 'admin') {
+      const n = unclassifiedAssocCount();
+      chip.textContent = n > 0 ? `Unclassified: ${n} assoc` : 'Unclassified: 0';
+      chip.classList.remove('is-hidden');
+    } else {
+      chip.classList.add('is-hidden');
+    }
   }
 
   function init() {
     const list = document.getElementById('orbit-fn-list');
     if (!list) return;
+    hydrate();
     list.querySelectorAll('.orbit-fn__btn').forEach(b =>
       b.addEventListener('click', () => select(b.dataset.fn)));
     let saved = null;
@@ -4576,7 +4993,7 @@ const FN = (() => {
     select(valid ? saved : DEFAULT_FN, false);
   }
 
-  return { init, select };
+  return { init, select, updateUnChip, stateOf, NAMES, META };
 })();
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -4603,11 +5020,14 @@ const RAIL = (() => {
     try { localStorage.setItem(KEY, c ? '1' : '0'); } catch (_) {}
   }
 
-  // If a non-live function's Under Construction view is showing,
-  // return to the live function before routing to a module page.
+  // If a non-full function view (Under Construction or QA-only) is
+  // showing, return to the default function before routing to a module page.
   function ensureLiveFn() {
-    const uc = document.getElementById('orbit-fn-uc');
-    if (uc && !uc.classList.contains('is-hidden')) FN.select('disputes-intakes', false);
+    const blocked = ['orbit-fn-uc'].some(id => {
+      const el = document.getElementById(id);
+      return el && !el.classList.contains('is-hidden');
+    });
+    if (blocked) FN.select('disputes-intakes', false);
   }
 
   function mark(btn) {
